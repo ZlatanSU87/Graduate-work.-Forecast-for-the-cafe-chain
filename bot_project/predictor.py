@@ -126,7 +126,17 @@ class CafePredictor:
             "forecast_end_date": str(self.forecast_end_date),
             "horizon_days":      self.horizon,
         }
-
+    
+    def mape_info(self) -> dict:
+        """Возвращает MAPE-метрики из meta.json для отображения в боте."""
+        return {
+            "mape_median":     self.meta.get("mape_median", None),
+            "mape_mean":       self.meta.get("mape_mean", None),
+            "mape_by_horizon": self.meta.get("mape_by_horizon", {}),
+            "coverage":        self.meta.get("coverage", {}),
+            "distribution":    self.meta.get("mape_distribution", {}),
+        }
+        
     def predict_dishes(self, target_date, enterprise=None,
                         top_n=10) -> pd.DataFrame:
         d = self._check_date(target_date)
