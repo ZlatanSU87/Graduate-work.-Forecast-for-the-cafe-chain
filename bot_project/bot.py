@@ -141,16 +141,31 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(msg: Message):
+    # Достаём метрики точности
+    mape = predictor.mape_info()
+    mape_text = ""
+    if mape.get("mape_median"):
+        cov10 = mape.get("coverage", {}).get("within_10pct", 0)
+        cov20 = mape.get("coverage", {}).get("within_20pct", 0)
+        mape_text = (
+            f"\n\n📊 <b>Точность модели:</b>\n"
+            f"   • Медианная ошибка: <b>{mape['mape_median']:.1f}%</b>\n"
+            f"   • В ±10%: {cov10:.0f}% дней\n"
+            f"   • В ±20%: {cov20:.0f}% дней"
+        )
+
     text = (
         "👋 Привет! Я бот прогноза продаж сети кафе.\n\n"
         "<b>Что я умею:</b>\n"
         "/forecast <i>дата</i> [предприятие] — прогноз\n"
         "/network <i>дата</i> — прогноз по всей сети\n"
         "/top <i>дата</i> <i>предприятие</i> [N] — топ-N блюд\n"
-        "/dates — какие даты доступны\n\n"
+        "/dates — какие даты доступны\n"
+        "/accuracy — точность модели\n\n"
         "<b>Пример:</b>\n"
         "<code>/forecast 25.09.2025 Тетрис</code>\n\n"
         f"Доступные предприятия: {', '.join(predictor.available_enterprises())}"
+        + mape_text
     )
     await msg.answer(text, reply_markup=main_keyboard())
 
@@ -248,6 +263,40 @@ async def cmd_top(msg: Message, command: CommandObject):
         top_n = 10
     await _send_forecast(msg, d, enterprise, top_n=top_n)
 
+@dp.message(Command("accuracy"))
+async def cmd_accuracy(msg: Message):
+    mape = predictor.mape_info()
+    if not mape.get("mape_median"):
+        await msg.answer("⚠️ Метрики точности не найдены в meta.json")
+        return
+
+    by_h = mape.get("mape_by_horizon", {})
+    cov = mape.get("coverage", {})
+    dist = mape.get("distribution", {})
+
+    lines = [
+        "📊 <b>Точность модели прогноза</b>\n",
+        f"<b>Общее:</b>",
+        f"   • Медианная ошибка: <b>{mape['mape_median']:.2f}%</b>",
+        f"   • Средняя ошибка: {mape.get('mape_mean', 0):.2f}%",
+        "",
+        f"<b>Попаданий в допуски (на 60-дневном тесте):</b>",
+        f"   • В ±5%:  {cov.get('within_5pct', 0):.0f}% дней",
+        f"   • В ±10%: {cov.get('within_10pct', 0):.0f}% дней",
+        f"   • В ±15%: {cov.get('within_15pct', 0):.0f}% дней",
+        f"   • В ±20%: {cov.get('within_20pct', 0):.0f}% дней",
+        "",
+        f"<b>Медианный MAPE по горизонтам:</b>",
+        f"   • 1 день:   {by_h.get('1d', 0):.2f}%",
+        f"   • 3 дня:    {by_h.get('3d', 0):.2f}%",
+        f"   • 7 дней:   {by_h.get('7d', 0):.2f}%",
+        f"   • 14 дней:  {by_h.get('14d', 0):.2f}%",
+        f"   • 30 дней:  {by_h.get('30d', 0):.2f}%",
+        "",
+        f"<i>Тест: 60 дней × 4 предприятия = 239 точек. "
+        f"Медиана устойчива к выбросам, поэтому честнее среднего.</i>",
+    ]
+    await msg.answer("\n".join(lines))
 
 # ---------- callbacks ----------
 @dp.callback_query(F.data == "info:horizon")
