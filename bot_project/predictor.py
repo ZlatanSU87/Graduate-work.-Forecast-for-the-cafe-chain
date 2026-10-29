@@ -149,38 +149,43 @@ class CafePredictor:
             ft = ft[ft["Торговое предприятие"] == enterprise]
         total_qty = float(ft["forecast_qty"].sum()) if len(ft) else 0.0
 
-        # 2. Fallback на median_last7
-        if enterprise and enterprise in self.median_qty_map:
-            med = float(self.median_qty_map[enterprise])
-            if total_qty > 0 and med > 0 and total_qty < 0.7 * med:
-                total_qty = med
+        # 2. Умный Fallback: сравниваем с медианой ИМЕННО для этого дня недели
+        dow = d.dayofweek  # 0 = понедельник, 6 = воскресенье
+        
+        if enterprise:
+            # Берем медиану для конкретного предприятия и дня недели
+            ent_medians = self.median_qty_map.get(enterprise, {})
+            med = float(ent_medians.get(str(dow), ent_medians.get('all', 0))) if isinstance(ent_medians, dict) else 0
+            
+            if total_qty > 0 and med > 0 and total_qty < 0.5 * med: # Порог 50% вместо 70%
+                total_qty = med * 0.9  # Не ставим ровно медиану, а 90% от неё
         elif not enterprise and self.median_qty_map:
-            med_sum = sum(float(v) for v in self.median_qty_map.values())
-            if total_qty > 0 and med_sum > 0 and total_qty < 0.7 * med_sum:
-                total_qty = med_sum
+            # Для всей сети суммируем медианы всех предприятий для этого дня
+            med_sum = 0
+            for ent_data in self.median_qty_map.values():
+                if isinstance(ent_data, dict):
+                    med_sum += float(ent_data.get(str(dow), ent_data.get('all', 0)))
+            if total_qty > 0 and med_sum > 0 and total_qty < 0.5 * med_sum:
+                total_qty = med_sum * 0.9
 
         # 3. Total revenue = qty * avg_price
         avg_price = self._get_avg_price(enterprise)
         total_revenue = total_qty * avg_price
 
-        # 4. Dish breakdown (без scale, с фильтром модификаторов)
+        # 4. Dish breakdown
         dishes = self.predict_dishes(target_date, enterprise, top_n=10000)
-
         MODIFIER_NAMES = {
             'сироп', 'сироп 20 гр', 'сливки', 'сливки топпинг', '-сливки',
             'корица', '-корица', 'сгущенка топпинг', 'сметана топпинг',
-            'просто сливки', 'коровье', '-молоко', 'молоко',
+            'просто сливки', 'корова', '-молоко', 'молоко',
             'стакан молока ребенку', 'стакан', 'пакет с ручками',
             'прибор 1шт', 'с собои', 'в кофеине', 'с собои подогреть',
         }
         dishes_filtered = dishes[
             ~dishes["Блюдо_canonical"].astype(str).str.lower().isin(MODIFIER_NAMES)
         ].copy()
-
-        # Выручка по каждому блюду
         dishes_filtered["revenue"] = dishes_filtered["forecast"] * dishes_filtered["price"]
         
-        # Сортируем по выручке и берём top_n
         dishes_filtered = (dishes_filtered.sort_values("revenue", ascending=False)
                            .head(top_n).reset_index(drop=True))
 
