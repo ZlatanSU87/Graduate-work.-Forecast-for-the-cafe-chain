@@ -1,13 +1,5 @@
 """
 predictor.py — интерфейс прогноза для Telegram-бота кафе.
-
-Читает артефакты, не загружает ML-модели. Лёгкий (<50 МБ) и быстрый.
-
-Артефакты в artifacts/:
-    forecast_dish.csv           [date, Блюдо_canonical, Торговое предприятие, forecast]
-    forecast_total.csv          [date, Торговое предприятие, forecast_qty]
-    price_map.pkl               Series[(Блюдо_canonical, Торговое предприятие) → price]
-    meta.json                   {..., avg_price_by_enterprise, median_qty_last_7_days}
 """
 from __future__ import annotations
 
@@ -54,14 +46,13 @@ class CafePredictor:
         self.horizon           = int(self.meta["horizon"])
         self.enterprises       = list(self.meta.get("enterprises", []))
         self.avg_price_map     = self.meta.get("avg_price_by_enterprise", {})
-        self.median_qty_map    = self.meta.get("median_qty_last_7_days", {})
-        self.forecast_end_date = (self.last_train_date
-                                  + pd.Timedelta(days=self.horizon)).date()
+        # ⭐ Читаем новый словарь медиан по дням недели
+        self.median_qty_by_dow = self.meta.get("median_qty_by_dow", {})
+        
+        self.forecast_end_date = (self.last_train_date + pd.Timedelta(days=self.horizon)).date()
 
-        self.forecast_dish = pd.read_csv(
-            os.path.join(self.dir, "forecast_dish.csv"), parse_dates=["date"])
-        self.forecast_total = pd.read_csv(
-            os.path.join(self.dir, "forecast_total.csv"), parse_dates=["date"])
+        self.forecast_dish = pd.read_csv(os.path.join(self.dir, "forecast_dish.csv"), parse_dates=["date"])
+        self.forecast_total = pd.read_csv(os.path.join(self.dir, "forecast_total.csv"), parse_dates=["date"])
         self.price_map = joblib.load(os.path.join(self.dir, "price_map.pkl"))
 
         self.forecast_dish["date"]  = self.forecast_dish["date"].dt.normalize()
@@ -72,11 +63,9 @@ class CafePredictor:
     def _check_date(self, target_date) -> pd.Timestamp:
         d = pd.Timestamp(target_date).normalize()
         if d <= self.last_train_date:
-            raise ValueError(f"Дата {d.date()} должна быть позже "
-                             f"{self.last_train_date.date()}")
+            raise ValueError(f"Дата {d.date()} должна быть позже {self.last_train_date.date()}")
         if d > pd.Timestamp(self.forecast_end_date):
-            raise ValueError(f"Дата {d.date()} вне горизонта "
-                             f"(до {self.forecast_end_date})")
+            raise ValueError(f"Дата {d.date()} вне горизонта (до {self.forecast_end_date})")
         return d
 
     def _get_price(self, dish: str, enterprise: Optional[str] = None) -> float:
@@ -85,8 +74,7 @@ class CafePredictor:
             return float(self.price_map[(dish, enterprise)])
         if dish not in self._dish_price_cache:
             sub = self.price_map[idx.get_level_values("Блюдо_canonical") == dish]
-            self._dish_price_cache[dish] = (
-                float(sub.median()) if len(sub) else float(self.price_map.median()))
+            self._dish_price_cache[dish] = float(sub.median()) if len(sub) else float(self.price_map.median())
         return self._dish_price_cache[dish]
 
     def _get_avg_price(self, enterprise: Optional[str] = None) -> float:
@@ -126,49 +114,45 @@ class CafePredictor:
         agg = fc.groupby("Блюдо_canonical", as_index=False)["forecast"].sum()
 
         if enterprise:
-            agg["price"] = agg["Блюдо_canonical"].map(
-                lambda x: self._get_price(x, enterprise))
+            agg["price"] = agg["Блюдо_canonical"].map(lambda x: self._get_price(x, enterprise))
         else:
-            ent_map = (fc.groupby("Блюдо_canonical")["Торговое предприятие"]
-                         .apply(list).to_dict())
+            ent_map = (fc.groupby("Блюдо_canonical")["Торговое предприятие"].apply(list).to_dict())
             agg["price"] = agg["Блюдо_canonical"].map(
-                lambda x: float(np.mean([self._get_price(x, e)
-                                          for e in ent_map.get(x, [])]))
+                lambda x: float(np.mean([self._get_price(x, e) for e in ent_map.get(x, [])]))
                           if ent_map.get(x) else float(self.price_map.median()))
 
         agg["revenue"] = agg["forecast"] * agg["price"]
-        return (agg.sort_values("forecast", ascending=False)
-                   .head(top_n).reset_index(drop=True))
+        return (agg.sort_values("forecast", ascending=False).head(top_n).reset_index(drop=True))
 
     def predict_total(self, target_date, enterprise=None, top_n=10) -> TotalPrediction:
         d = self._check_date(target_date)
 
-        # 1. Total qty из total-модели
+        # 1. Total qty из ML
         ft = self.forecast_total[self.forecast_total["date"] == d]
         if enterprise:
             ft = ft[ft["Торговое предприятие"] == enterprise]
         total_qty = float(ft["forecast_qty"].sum()) if len(ft) else 0.0
 
-        # 2. Умный Fallback: сравниваем с медианой ИМЕННО для этого дня недели
-        dow = d.dayofweek  # 0 = понедельник, 6 = воскресенье
+        # 2. ⭐ Умный Fallback по дням недели
+        dow = str(d.dayofweek)  # 0 = Пн, 6 = Вс
         
-        if enterprise:
-            # Берем медиану для конкретного предприятия и дня недели
-            ent_medians = self.median_qty_map.get(enterprise, {})
-            med = float(ent_medians.get(str(dow), ent_medians.get('all', 0))) if isinstance(ent_medians, dict) else 0
-            
-            if total_qty > 0 and med > 0 and total_qty < 0.5 * med: # Порог 50% вместо 70%
-                total_qty = med * 0.9  # Не ставим ровно медиану, а 90% от неё
-        elif not enterprise and self.median_qty_map:
-            # Для всей сети суммируем медианы всех предприятий для этого дня
+        if enterprise and enterprise in self.median_qty_by_dow:
+            ent_medians = self.median_qty_by_dow[enterprise]
+            med = float(ent_medians.get(dow, ent_medians.get('all', 0)))
+            # Если прогноз < 50% от медианы ЭТОГО дня недели — это явный глюк
+            if total_qty > 0 and med > 0 and total_qty < 0.5 * med:
+                print(f"⚠️ Sanity Guard: {enterprise} на {d.date()} прогноз {total_qty:.0f} < 50% от медианы {med:.0f}. Корректируем.")
+                total_qty = med * 0.9  # Чуть ниже медианы для консервативности
+                
+        elif not enterprise and self.median_qty_by_dow:
             med_sum = 0
-            for ent_data in self.median_qty_map.values():
-                if isinstance(ent_data, dict):
-                    med_sum += float(ent_data.get(str(dow), ent_data.get('all', 0)))
+            for ent, med_dict in self.median_qty_by_dow.items():
+                med_sum += float(med_dict.get(dow, med_dict.get('all', 0)))
             if total_qty > 0 and med_sum > 0 and total_qty < 0.5 * med_sum:
+                print(f"⚠️ Sanity Guard: Вся сеть на {d.date()} прогноз {total_qty:.0f} < 50% от медианы {med_sum:.0f}. Корректируем.")
                 total_qty = med_sum * 0.9
 
-        # 3. Total revenue = qty * avg_price
+        # 3. Total revenue
         avg_price = self._get_avg_price(enterprise)
         total_revenue = total_qty * avg_price
 
@@ -177,17 +161,14 @@ class CafePredictor:
         MODIFIER_NAMES = {
             'сироп', 'сироп 20 гр', 'сливки', 'сливки топпинг', '-сливки',
             'корица', '-корица', 'сгущенка топпинг', 'сметана топпинг',
-            'просто сливки', 'корова', '-молоко', 'молоко',
+            'просто сливки', 'коровье', '-молоко', 'молоко',
             'стакан молока ребенку', 'стакан', 'пакет с ручками',
             'прибор 1шт', 'с собои', 'в кофеине', 'с собои подогреть',
         }
-        dishes_filtered = dishes[
-            ~dishes["Блюдо_canonical"].astype(str).str.lower().isin(MODIFIER_NAMES)
-        ].copy()
+        dishes_filtered = dishes[~dishes["Блюдо_canonical"].astype(str).str.lower().isin(MODIFIER_NAMES)].copy()
         dishes_filtered["revenue"] = dishes_filtered["forecast"] * dishes_filtered["price"]
         
-        dishes_filtered = (dishes_filtered.sort_values("revenue", ascending=False)
-                           .head(top_n).reset_index(drop=True))
+        dishes_filtered = (dishes_filtered.sort_values("revenue", ascending=False).head(top_n).reset_index(drop=True))
 
         return TotalPrediction(
             target_date=d.date(),
@@ -196,7 +177,6 @@ class CafePredictor:
             total_revenue=total_revenue,
             dishes=dishes_filtered,
         )
-
 
 if __name__ == "__main__":
     import argparse
@@ -210,13 +190,11 @@ if __name__ == "__main__":
     p = CafePredictor(args.dir)
     print("📦 Загружено:", p.horizon_info())
     print("🏢 Предприятия:", p.available_enterprises())
-    print("💰 Avg price:", {k: f"{v:.1f}" for k, v in p.avg_price_map.items()})
-
+    
     d = args.date or str(p.last_train_date.date() + pd.Timedelta(days=7))
     print(f"\n=== Прогноз на {d} ===")
     r = p.predict_total(d, args.enterprise, top_n=args.top)
     print(f"Точка: {r.enterprise}")
     print(f"Всего: {r.pretty_qty()} шт.  |  {r.pretty_revenue()} ₽")
     print("\nТоп блюд:")
-    print(r.dishes[["Блюдо_canonical", "forecast", "price", "revenue"]]
-          .to_string(index=False))
+    print(r.dishes[["Блюдо_canonical", "forecast", "price", "revenue"]].to_string(index=False))
