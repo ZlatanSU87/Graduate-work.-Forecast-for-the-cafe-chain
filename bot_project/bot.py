@@ -25,31 +25,35 @@ load_dotenv()
 ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
 ARTIFACTS_DIR.mkdir(exist_ok=True)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-SA_JSON_STR = os.environ.get("SERVICE_ACCOUNT_JSON")
+SA_JSON_PATH = Path(__file__).parent / "service_account.json" # <--- Читаем из файла
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN.")
-if not SA_JSON_STR:
-    raise RuntimeError("Не задан SERVICE_ACCOUNT_JSON.")
+if not SA_JSON_PATH.exists():
+    raise RuntimeError("Не найден файл service_account.json!")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("cafe-bot")
 
 def download_artifacts_from_drive():
     try:
-        sa_json = json.loads(SA_JSON_STR)
+        # ⚠️ ИЗМЕНЕНИЕ: Читаем JSON из файла
+        with open(SA_JSON_PATH, 'r', encoding='utf-8') as f:
+            sa_json = json.load(f)
+
         creds = service_account.Credentials.from_service_account_info(
             sa_json, scopes=['https://www.googleapis.com/auth/drive.readonly']
         )
         service = build('drive', 'v3', credentials=creds)
 
+        # Ищем папку artifacts
         res = service.files().list(
             q="name='artifacts' and mimeType='application/vnd.google-apps.folder' and trashed=false",
             fields="files(id)"
         ).execute()
         folders = res.get('files', [])
         if not folders:
-            log.error("Папка artifacts не найдена.")
+            log.error("Папка artifacts не найдена на Диске.")
             return False
         folder_id = folders[0]['id']
 
@@ -77,7 +81,7 @@ def download_artifacts_from_drive():
     except Exception as e:
         log.error(f"Ошибка скачивания артефактов: {e}")
         return False
-
+        
 log.info("Скачиваем актуальные артефакты с Google Drive...")
 if not download_artifacts_from_drive():
     log.warning("Не удалось скачать свежие артефакты.")
