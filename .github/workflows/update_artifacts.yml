@@ -1,0 +1,89 @@
+name: Weekly Artifacts Update
+
+on:
+  schedule:
+    # Запуск каждое воскресенье в 03:00 UTC (06:00 МСК)
+    - cron: '0 3 * * 0'
+  workflow_dispatch: # Позволяет запустить вручную для проверки
+
+jobs:
+  update-files:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install google-api-python-client google-auth
+
+      - name: Download artifacts from Google Drive
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        run: |
+          python << 'EOF'
+          import json, os, io
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaIoBaseDownload
+          from pathlib import Path
+
+          # Авторизация
+          sa_json = json.loads(os.environ['SERVICE_ACCOUNT_JSON'])
+          creds = service_account.Credentials.from_service_account_info(
+              sa_json, scopes=['https://www.googleapis.com/auth/drive.readonly']
+          )
+          service = build('drive', 'v3', credentials=creds)
+
+          # Ищем папку artifacts на Диске
+          res = service.files().list(
+              q="name='artifacts' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+              fields="files(id)"
+          ).execute()
+          folders = res.get('files', [])
+          if not folders:
+              raise RuntimeError("Папка artifacts не найдена на Диске")
+          folder_id = folders[0]['id']
+
+          # Путь, куда сохращаем (внутри твоего репозитория)
+          dest = Path('bot_project/artifacts')
+          dest.mkdir(parents=True, exist_ok=True)
+          
+          files_to_get = ['forecast_dish.csv', 'forecast_total.csv', 'price_map.pkl', 'meta.json']
+
+          for fname in files_to_get:
+              f_res = service.files().list(
+                  q=f"name='{fname}' and '{folder_id}' in parents and trashed=false",
+                  fields="files(id)"
+              ).execute().get('files', [])
+              if not f_res:
+                  print(f'Файл {fname} не найден, пропускаем')
+                  continue
+              file_id = f_res[0]['id']
+              req = service.files().get_media(fileId=file_id)
+              local_path = dest / fname
+              with io.FileIO(local_path, 'wb') as fh:
+                  downloader = MediaIoBaseDownload(fh, req)
+                  done = False
+                  while not done:
+                      _, done = downloader.next_chunk()
+              print(f'Скачан: {fname}')
+          EOF
+
+      - name: Commit and push changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          # Добавляем файлы принудительно (-f), на случай если они в .gitignore
+          git add -f bot_project/artifacts/
+          if git diff --staged --quiet; then
+            echo "Нет изменений для коммита"
+          else
+            git commit -m "Auto-update artifacts [skip ci]"
+            git push
+          fi
