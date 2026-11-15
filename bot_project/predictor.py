@@ -46,7 +46,6 @@ class CafePredictor:
         self.horizon           = int(self.meta["horizon"])
         self.enterprises       = list(self.meta.get("enterprises", []))
         self.avg_price_map     = self.meta.get("avg_price_by_enterprise", {})
-        # ⭐ Читаем новый словарь медиан по дням недели
         self.median_qty_by_dow = self.meta.get("median_qty_by_dow", {})
         
         self.forecast_end_date = (self.last_train_date + pd.Timedelta(days=self.horizon)).date()
@@ -133,16 +132,15 @@ class CafePredictor:
             ft = ft[ft["Торговое предприятие"] == enterprise]
         total_qty = float(ft["forecast_qty"].sum()) if len(ft) else 0.0
 
-        # 2. ⭐ Умный Fallback по дням недели
-        dow = str(d.dayofweek)  # 0 = Пн, 6 = Вс
+        # 2. Умный Fallback по дням недели
+        dow = str(d.dayofweek)
         
         if enterprise and enterprise in self.median_qty_by_dow:
             ent_medians = self.median_qty_by_dow[enterprise]
             med = float(ent_medians.get(dow, ent_medians.get('all', 0)))
-            # Если прогноз < 50% от медианы ЭТОГО дня недели — это явный глюк
             if total_qty > 0 and med > 0 and total_qty < 0.5 * med:
                 print(f"⚠️ Sanity Guard: {enterprise} на {d.date()} прогноз {total_qty:.0f} < 50% от медианы {med:.0f}. Корректируем.")
-                total_qty = med * 0.9  # Чуть ниже медианы для консервативности
+                total_qty = med * 0.9
                 
         elif not enterprise and self.median_qty_by_dow:
             med_sum = 0
@@ -161,8 +159,7 @@ class CafePredictor:
         MODIFIER_NAMES = {
             'сироп', 'сироп 20 гр', 'сливки', 'сливки топпинг', '-сливки',
             'корица', '-корица', 'сгущенка топпинг', 'сметана топпинг',
-            'просто сливки', '-молоко', 'молоко',
-            'коровье',                       # <--- ВЕРНУЛИ
+            'просто сливки', '-молоко', 'молоко', 'коровье',
             'стакан молока ребенку', 'стакан', 'пакет с ручками',
             'прибор 1шт', 'с собои', 'в кофеине', 'с собои подогреть',
         }
@@ -178,24 +175,3 @@ class CafePredictor:
             total_revenue=total_revenue,
             dishes=dishes_filtered,
         )
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dir", default="artifacts")
-    parser.add_argument("--date", default=None)
-    parser.add_argument("--enterprise", default=None)
-    parser.add_argument("--top", type=int, default=10)
-    args = parser.parse_args()
-
-    p = CafePredictor(args.dir)
-    print("📦 Загружено:", p.horizon_info())
-    print("🏢 Предприятия:", p.available_enterprises())
-    
-    d = args.date or str(p.last_train_date.date() + pd.Timedelta(days=7))
-    print(f"\n=== Прогноз на {d} ===")
-    r = p.predict_total(d, args.enterprise, top_n=args.top)
-    print(f"Точка: {r.enterprise}")
-    print(f"Всего: {r.pretty_qty()} шт.  |  {r.pretty_revenue()} ₽")
-    print("\nТоп блюд:")
-    print(r.dishes[["Блюдо_canonical", "forecast", "price", "revenue"]].to_string(index=False))
