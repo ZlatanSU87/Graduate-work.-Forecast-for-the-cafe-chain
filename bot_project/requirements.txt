@@ -3,6 +3,3 @@ python-dotenv
 pandas
 numpy
 joblib
-google-api-python-client
-google-auth
-staypresent[prod]
